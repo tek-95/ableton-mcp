@@ -259,6 +259,13 @@ class AbletonMCP(ControlSurface):
                 track_index = params.get("track_index", 0)
                 clip_index = params.get("clip_index", 0)
                 response["result"] = self._get_clip_notes(track_index, clip_index)
+            elif command_type == "get_arrangement_clips":
+                track_index = params.get("track_index", 0)
+                response["result"] = self._get_arrangement_clips(track_index)
+            elif command_type == "get_arrangement_clip_notes":
+                track_index = params.get("track_index", 0)
+                clip_index = params.get("clip_index", 0)
+                response["result"] = self._get_arrangement_clip_notes(track_index, clip_index)
             elif command_type == "get_clip_info":
                 track_index = params.get("track_index", 0)
                 clip_index = params.get("clip_index", 0)
@@ -627,7 +634,7 @@ class AbletonMCP(ControlSurface):
                                  # Multi-track operations
                                  "solo_exclusive", "unsolo_all", "unmute_all", "unarm_all",
                                  # Device
-                                 "move_device", "move_device_left", "move_device_right", "set_device_collapsed",
+                                 "move_device", "move_device_to_track", "move_device_left", "move_device_right", "set_device_collapsed",
                                  # Track freeze/flatten
                                  "freeze_track", "flatten_track",
                                  # Cue points
@@ -651,6 +658,8 @@ class AbletonMCP(ControlSurface):
                                  # Clip operations
                                  "quantize_clip", "deselect_all_notes", "duplicate_clip_loop",
                                  "set_clip_notes", "move_clip_notes",
+                                 # Arrangement clip notes
+                                 "remap_arrangement_notes", "transpose_arrangement_clip", "set_arrangement_clip_notes",
                                  # Scrub
                                  "scrub_by"]:
                 # Use a thread-safe approach with a response queue
@@ -739,6 +748,17 @@ class AbletonMCP(ControlSurface):
                             parameter_index = params.get("parameter_index", 0)
                             value = params.get("value", 0.0)
                             result = self._set_device_parameter(track_index, device_index, parameter_index, value)
+                        elif command_type == "remap_arrangement_notes":
+                            result = self._remap_arrangement_notes(
+                                params.get("track_index", 0), params.get("from_pitch"), params.get("to_pitch"),
+                                params.get("clip_indices"), params.get("include_session", False))
+                        elif command_type == "set_arrangement_clip_notes":
+                            result = self._set_arrangement_clip_notes(
+                                params.get("track_index", 0), params.get("clip_index", 0), params.get("notes", []))
+                        elif command_type == "transpose_arrangement_clip":
+                            result = self._remap_arrangement_notes(
+                                params.get("track_index", 0), None, None,
+                                [params.get("clip_index", 0)], False, params.get("semitones", 0))
                         # Scene commands
                         elif command_type == "create_scene":
                             index = params.get("index", -1)
@@ -1215,6 +1235,9 @@ class AbletonMCP(ControlSurface):
                         elif command_type == "flatten_track":
                             track_index = params.get("track_index", 0)
                             result = self._flatten_track(track_index)
+                        elif command_type == "move_device_to_track":
+                            result = self._move_device_to_track(params.get("track_index", 0), params.get("device_index", 0),
+                                                                params.get("target_track_index", 0), params.get("position", -1))
                         elif command_type == "move_device":
                             track_index = params.get("track_index", 0)
                             device_index = params.get("device_index", 0)
@@ -2002,6 +2025,99 @@ class AbletonMCP(ControlSurface):
         except Exception as e:
             self.log_message("Error setting track pan: " + str(e))
             raise
+
+    def _arrangement_track(self, track_index):
+        if track_index < 0 or track_index >= len(self._song.tracks):
+            raise IndexError("Track index out of range")
+        return self._song.tracks[track_index]
+
+    def _all_clip_notes(self, clip):
+        span = max(clip.end_marker, clip.loop_end, clip.length) + 1024.0
+        return clip.get_notes_extended(0, 128, 0.0, span)
+
+    def _get_arrangement_clips(self, track_index):
+        track = self._arrangement_track(track_index)
+        clips = []
+        for i, clip in enumerate(track.arrangement_clips):
+            clips.append({
+                "index": i,
+                "name": clip.name,
+                "start_time": clip.start_time,
+                "end_time": clip.end_time,
+                "is_midi_clip": clip.is_midi_clip,
+                "muted": clip.muted,
+            })
+        return {"track_index": track_index, "track_name": track.name, "clips": clips}
+
+    def _get_arrangement_clip_notes(self, track_index, clip_index):
+        track = self._arrangement_track(track_index)
+        clips = list(track.arrangement_clips)
+        if clip_index < 0 or clip_index >= len(clips):
+            raise IndexError("Arrangement clip index out of range")
+        clip = clips[clip_index]
+        if not clip.is_midi_clip:
+            raise Exception("Clip is not a MIDI clip")
+        notes = [{"pitch": n.pitch, "start_time": n.start_time, "duration": n.duration,
+                  "velocity": n.velocity, "mute": n.mute, "probability": n.probability,
+                  "velocity_deviation": n.velocity_deviation, "release_velocity": n.release_velocity}
+                 for n in self._all_clip_notes(clip)]
+        return {"track_index": track_index, "clip_index": clip_index, "name": clip.name,
+                "start_time": clip.start_time, "end_time": clip.end_time, "notes": notes}
+
+    def _set_arrangement_clip_notes(self, track_index, clip_index, notes):
+        """Replace all notes of an arrangement MIDI clip (one undo step per call)."""
+        track = self._arrangement_track(track_index)
+        clips = list(track.arrangement_clips)
+        if clip_index < 0 or clip_index >= len(clips):
+            raise IndexError("Arrangement clip index out of range")
+        clip = clips[clip_index]
+        if not clip.is_midi_clip:
+            raise Exception("Clip is not a MIDI clip")
+        # Live 11 note API (no "older process" warning; keeps probability / velocity deviation / release velocity).
+        import Live
+        span = max(clip.end_marker, clip.loop_end, clip.length) + 1024.0
+        clip.remove_notes_extended(0, 128, -1024.0, span + 1024.0)
+        specs = []
+        for n in notes:
+            kw = dict(pitch=int(n["pitch"]), start_time=float(n["start_time"]), duration=float(n["duration"]),
+                      velocity=float(n["velocity"]), mute=bool(n.get("mute", False)))
+            for k in ("probability", "velocity_deviation", "release_velocity"):
+                if k in n:
+                    kw[k] = float(n[k])
+            specs.append(Live.Clip.MidiNoteSpecification(**kw))
+        clip.add_new_notes(tuple(specs))
+        return {"track_index": track_index, "clip_index": clip_index, "count": len(notes)}
+
+    def _remap_arrangement_notes(self, track_index, from_pitch, to_pitch, clip_indices=None,
+                                 include_session=False, semitones=0):
+        """Change pitch of existing notes in place: from_pitch -> to_pitch, or shift all by semitones."""
+        track = self._arrangement_track(track_index)
+        targets = []
+        arr = list(track.arrangement_clips)
+        indices = range(len(arr)) if clip_indices is None else clip_indices
+        for i in indices:
+            if 0 <= i < len(arr) and arr[i].is_midi_clip:
+                targets.append(("arrangement", i, arr[i]))
+        if include_session:
+            for i, slot in enumerate(track.clip_slots):
+                if slot.has_clip and slot.clip.is_midi_clip:
+                    targets.append(("session", i, slot.clip))
+        report = []
+        for kind, i, clip in targets:
+            notes = self._all_clip_notes(clip)
+            changed = 0
+            for n in notes:
+                if from_pitch is None:
+                    n.pitch = max(0, min(127, n.pitch + semitones))
+                    changed += 1
+                elif n.pitch == from_pitch:
+                    n.pitch = to_pitch
+                    changed += 1
+            if changed:
+                clip.apply_note_modifications(notes)
+            report.append({"kind": kind, "index": i, "name": clip.name, "changed": changed})
+        return {"track_index": track_index, "clips": report,
+                "total_changed": sum(r["changed"] for r in report)}
 
     def _get_clip_notes(self, track_index, clip_index):
         """Get all notes from a clip"""
@@ -6285,6 +6401,16 @@ class AbletonMCP(ControlSurface):
             return {"success": True}
         except Exception as e:
             return {"error": str(e)}
+
+    def _move_device_to_track(self, track_index, device_index, target_track_index, position=-1):
+        """Move a device (with its full state, plugins included) to another track; position -1 = end of chain."""
+        tracks = list(self._song.tracks)
+        device = list(tracks[track_index].devices)[device_index]
+        target = tracks[target_track_index]
+        if position < 0:
+            position = len(target.devices)
+        self._song.move_device(device, target, position)
+        return {"moved": device.name, "to": target.name, "position": position}
 
     def _move_device(self, track_index, device_index, new_index):
         """Move device to new position"""
