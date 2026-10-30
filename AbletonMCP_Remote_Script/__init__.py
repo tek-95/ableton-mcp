@@ -630,7 +630,9 @@ class AbletonMCP(ControlSurface):
                                  # Song
                                  "set_signature", "set_current_song_time",
                                  # Return tracks
-                                 "create_return_track", "delete_return_track",
+                                 "create_return_track", "delete_return_track", "load_browser_item_to_return",
+                                 "get_return_device_parameters", "set_return_device_parameter", "delete_return_device",
+                                 "get_pad_chain_devices", "get_pad_device_parameters", "set_pad_device_parameter", "load_browser_item_to_pad",
                                  # Multi-track operations
                                  "solo_exclusive", "unsolo_all", "unmute_all", "unarm_all",
                                  # Device
@@ -1217,6 +1219,27 @@ class AbletonMCP(ControlSurface):
                             result = self._set_current_song_time(time)
                         elif command_type == "create_return_track":
                             result = self._create_return_track()
+                        elif command_type == "load_browser_item_to_return":
+                            result = self._load_browser_item_to_return(params.get("return_index", 0), params.get("item_uri", ""))
+                        elif command_type == "get_return_device_parameters":
+                            result = self._get_return_device_parameters(params.get("return_index", 0), params.get("device_index", 0))
+                        elif command_type == "set_return_device_parameter":
+                            result = self._set_return_device_parameter(params.get("return_index", 0), params.get("device_index", 0),
+                                                                       params.get("parameter_index", 0), params.get("value", 0.0))
+                        elif command_type == "delete_return_device":
+                            result = self._delete_return_device(params.get("return_index", 0), params.get("device_index", 0))
+                        elif command_type == "get_pad_chain_devices":
+                            result = self._get_pad_chain_devices(params.get("track_index", 0), params.get("device_index", 0), params.get("note", 36))
+                        elif command_type == "get_pad_device_parameters":
+                            result = self._get_pad_device_parameters(params.get("track_index", 0), params.get("device_index", 0),
+                                                                     params.get("note", 36), params.get("chain_device_index", 0))
+                        elif command_type == "set_pad_device_parameter":
+                            result = self._set_pad_device_parameter(params.get("track_index", 0), params.get("device_index", 0),
+                                                                    params.get("note", 36), params.get("chain_device_index", 0),
+                                                                    params.get("parameter_index", 0), params.get("value", 0.0))
+                        elif command_type == "load_browser_item_to_pad":
+                            result = self._load_browser_item_to_pad(params.get("track_index", 0), params.get("device_index", 0),
+                                                                    params.get("note", 36), params.get("item_uri", ""))
                         elif command_type == "delete_return_track":
                             index = params.get("index", 0)
                             result = self._delete_return_track(index)
@@ -1557,9 +1580,7 @@ class AbletonMCP(ControlSurface):
                 "midi_effects": browser.midi_effects,
             }
 
-            # Add plugins, samples and packs if available
-            if hasattr(browser, 'plugins'):
-                category_map["plugins"] = browser.plugins
+            # Add samples and packs if available
             if hasattr(browser, 'samples'):
                 category_map["samples"] = browser.samples
             if hasattr(browser, 'packs'):
@@ -1671,10 +1692,6 @@ class AbletonMCP(ControlSurface):
                     ("audio_effects", browser.audio_effects),
                     ("midi_effects", browser.midi_effects)
                 ]
-                if hasattr(browser, 'plugins'):
-                    categories_to_search.append(("plugins", browser.plugins))
-            elif category == "plugins" and hasattr(browser, 'plugins'):
-                categories_to_search = [("plugins", browser.plugins)]
             elif category == "instruments":
                 categories_to_search = [("instruments", browser.instruments)]
             elif category == "sounds":
@@ -2248,6 +2265,99 @@ class AbletonMCP(ControlSurface):
             self.log_message("Error deleting clip: " + str(e))
             raise
 
+    def _return_device(self, return_index, device_index):
+        track = self._validate_return_track_index(return_index)
+        if device_index < 0 or device_index >= len(track.devices):
+            raise IndexError("Device index out of range")
+        return track, track.devices[device_index]
+
+    def _get_return_device_parameters(self, return_index, device_index):
+        """Get all parameters of a device on a return track, with display strings"""
+        track, device = self._return_device(return_index, device_index)
+        parameters = []
+        for i, param in enumerate(device.parameters):
+            parameters.append({"index": i, "name": param.name, "value": param.value,
+                               "min": param.min, "max": param.max, "display": str(param),
+                               "is_enabled": param.is_enabled, "is_quantized": param.is_quantized})
+        return {"return_index": return_index, "device_index": device_index, "device_name": device.name,
+                "device_class": device.class_name, "parameters": parameters}
+
+    def _set_return_device_parameter(self, return_index, device_index, parameter_index, value):
+        """Set a parameter of a device on a return track"""
+        track, device = self._return_device(return_index, device_index)
+        if parameter_index < 0 or parameter_index >= len(device.parameters):
+            raise IndexError("Parameter index out of range")
+        param = device.parameters[parameter_index]
+        if not param.is_enabled:
+            raise Exception("Parameter is not enabled")
+        param.value = max(param.min, min(param.max, value))
+        return {"return_index": return_index, "device_index": device_index, "parameter_name": param.name,
+                "value": param.value, "display": str(param)}
+
+    def _delete_return_device(self, return_index, device_index):
+        """Delete a device from a return track"""
+        track, device = self._return_device(return_index, device_index)
+        name = device.name
+        track.delete_device(device_index)
+        return {"deleted": name, "return_index": return_index, "device_index": device_index}
+
+    def _pad_chain(self, track_index, device_index, note):
+        """First chain of the Drum Rack pad that receives `note`"""
+        track = self._validate_track_index(track_index)
+        rack = self._validate_device_index(track, device_index)
+        if not rack.can_have_drum_pads:
+            raise Exception("Device is not a Drum Rack")
+        pad = rack.drum_pads[note]
+        if not pad.chains:
+            raise Exception("Pad {0} is empty".format(note))
+        return pad.chains[0]
+
+    def _pad_device(self, track_index, device_index, note, chain_device_index):
+        chain = self._pad_chain(track_index, device_index, note)
+        if chain_device_index < 0 or chain_device_index >= len(chain.devices):
+            raise IndexError("Chain device index out of range")
+        return chain.devices[chain_device_index]
+
+    def _get_pad_chain_devices(self, track_index, device_index, note):
+        """List devices in a Drum Rack pad chain, plus the chain mixer"""
+        chain = self._pad_chain(track_index, device_index, note)
+        mixer = chain.mixer_device
+        return {"note": note, "chain_name": chain.name,
+                "devices": [{"index": i, "name": d.name, "class_name": d.class_name} for i, d in enumerate(chain.devices)],
+                "volume": mixer.volume.value, "volume_display": str(mixer.volume),
+                "pan": mixer.panning.value, "pan_display": str(mixer.panning)}
+
+    def _get_pad_device_parameters(self, track_index, device_index, note, chain_device_index):
+        """All parameters of a device inside a Drum Rack pad chain, with display strings"""
+        device = self._pad_device(track_index, device_index, note, chain_device_index)
+        return {"note": note, "device_name": device.name, "device_class": device.class_name,
+                "parameters": [{"index": i, "name": p.name, "value": p.value, "min": p.min, "max": p.max,
+                                "display": str(p), "is_enabled": p.is_enabled, "is_quantized": p.is_quantized}
+                               for i, p in enumerate(device.parameters)]}
+
+    def _set_pad_device_parameter(self, track_index, device_index, note, chain_device_index, parameter_index, value):
+        """Set a parameter of a device inside a Drum Rack pad chain"""
+        device = self._pad_device(track_index, device_index, note, chain_device_index)
+        if parameter_index < 0 or parameter_index >= len(device.parameters):
+            raise IndexError("Parameter index out of range")
+        param = device.parameters[parameter_index]
+        if not param.is_enabled:
+            raise Exception("Parameter is not enabled")
+        param.value = max(param.min, min(param.max, value))
+        return {"note": note, "parameter_name": param.name, "value": param.value, "display": str(param)}
+
+    def _load_browser_item_to_pad(self, track_index, device_index, note, item_uri):
+        """Load a browser item at the end of a Drum Rack pad chain"""
+        chain = self._pad_chain(track_index, device_index, note)
+        item = self._find_browser_item_by_uri(self.application().browser, item_uri)
+        if not item or not item.is_loadable:
+            return {"error": "Browser item not found or not loadable: {0}".format(item_uri)}
+        self._song.view.selected_track = self._validate_track_index(track_index)
+        self._song.view.select_device(chain.devices[-1])
+        self.application().browser.load_item(item)
+        return {"loaded": True, "item_name": item.name, "note": note,
+                "devices": [d.name for d in chain.devices]}
+
     def _get_device_parameters(self, track_index, device_index):
         """Get all parameters from a device"""
         try:
@@ -2270,7 +2380,8 @@ class AbletonMCP(ControlSurface):
                     "min": param.min,
                     "max": param.max,
                     "is_enabled": param.is_enabled,
-                    "is_quantized": param.is_quantized
+                    "is_quantized": param.is_quantized,
+                    "display": str(param)
                 }
                 if param.is_quantized:
                     param_info["value_items"] = list(param.value_items) if hasattr(param, 'value_items') else []
@@ -4727,10 +4838,8 @@ class AbletonMCP(ControlSurface):
                 
                 # Determine the root based on the first part
                 current_item = None
-                if path_parts[0].lower() == "instruments":
+                if path_parts[0].lower() == "nstruments":
                     current_item = app.browser.instruments
-                elif path_parts[0].lower() == "plugins" and hasattr(app.browser, 'plugins'):
-                    current_item = app.browser.plugins
                 elif path_parts[0].lower() == "sounds":
                     current_item = app.browser.sounds
                 elif path_parts[0].lower() == "drums":
@@ -4815,8 +4924,41 @@ class AbletonMCP(ControlSurface):
             self.log_message(traceback.format_exc())
             raise
     
+    def _find_browser_item_by_uri_path(self, browser, uri):
+        """Walk straight down the path encoded in a 'query:Category#A:B:Leaf' URI"""
+        try:
+            from urllib.parse import unquote
+            if not uri.startswith('query:') or '#' not in uri:
+                return None
+            cat, rest = uri[len('query:'):].split('#', 1)
+            roots = {'AudioFx': 'audio_effects', 'MidiFx': 'midi_effects', 'Instruments': 'instruments',
+                     'Drums': 'drums', 'Sounds': 'sounds', 'Plugins': 'plugins'}
+            node = getattr(browser, roots.get(cat, ''), None)
+            if node is None:
+                return None
+            parts = rest.split(':')
+            for depth in range(len(parts)):
+                prefix = 'query:' + cat + '#' + ':'.join(parts[:depth + 1])
+                nxt = None
+                for child in node.children:
+                    if child.uri == uri:
+                        return child
+                    if child.uri == prefix or (child.is_folder and unquote(child.name) == unquote(parts[depth])):
+                        nxt = child
+                if nxt is None:
+                    return None
+                node = nxt
+            return node if node.uri == uri else None
+        except Exception as e:
+            self.log_message("Fast URI lookup failed: {0}".format(str(e)))
+            return None
+
     def _find_browser_item_by_uri(self, browser_or_item, uri, max_depth=10, current_depth=0):
         """Find a browser item by its URI"""
+        if current_depth == 0 and hasattr(browser_or_item, 'instruments'):
+            item = self._find_browser_item_by_uri_path(browser_or_item, uri)
+            if item is not None or uri.startswith('query:'):
+                return item
         try:
             # Check if this is the item we're looking for
             if hasattr(browser_or_item, 'uri') and browser_or_item.uri == uri:

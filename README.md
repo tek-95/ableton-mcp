@@ -1,5 +1,47 @@
 # AbletonMCP - Ableton Live Model Context Protocol Integration
 
+> **This is the tek-95 fork** of [jpoindexter/ableton-mcp](https://github.com/jpoindexter/ableton-mcp)
+> (itself based on [ahujasid/ableton-mcp](https://github.com/ahujasid/ableton-mcp)).
+> Everything below the "Fork changes" section is the upstream README. The fork changes are listed here.
+
+## Fork changes (tek-95)
+
+All changes are in the Remote Script (`AbletonMCP_Remote_Script/__init__.py`) unless noted.
+The new socket commands are not exposed as MCP tools yet; send them as JSON to port 9877
+(`{"type": "<command>", "params": {...}}`).
+
+### Fixes
+- **Live froze on `load_browser_item_to_return`.** The command ran on the socket thread and touched
+  the Live API from there. It now runs on Live's main thread like the other state-changing commands.
+- **Browser URI lookup no longer walks the whole browser.** `query:Category#A:B:Leaf` URIs are resolved
+  by following the path (a few lookups instead of tens of thousands). An unknown `query:` URI returns
+  "not found" instead of a full scan.
+- **MCP server starts with current `mcp` SDK releases** (branch `fix/mcp-sdk-compat`).
+
+### New commands
+| Command | Params | What it does |
+|---|---|---|
+| `get_arrangement_clips` | `track_index` | Arrangement clips on a track |
+| `get_arrangement_clip_notes` | `track_index`, `clip_index` | All notes of an arrangement MIDI clip |
+| `set_arrangement_clip_notes` | `track_index`, `clip_index`, `notes` | Replace all notes (Live 11 note API; one undo step) |
+| `remap_arrangement_notes` | `track_index`, `from_pitch`, `to_pitch` | Change the pitch of existing notes in place |
+| `transpose_arrangement_clip` | `track_index`, `clip_index`, `semitones` | Transpose an arrangement clip |
+| `move_device_to_track` | `track_index`, `device_index`, `target_track_index` | Move a device between tracks |
+| `get_return_device_parameters` | `return_index`, `device_index` | Parameters of a device on a return track |
+| `set_return_device_parameter` | `return_index`, `device_index`, `parameter_index`, `value` | Set a parameter on a return-track device |
+| `delete_return_device` | `return_index`, `device_index` | Delete a device from a return track |
+| `get_pad_chain_devices` | `track_index`, `device_index`, `note` | Devices, volume and pan of a Drum Rack pad chain |
+| `get_pad_device_parameters` | `track_index`, `device_index`, `note`, `chain_device_index` | Parameters of a device inside a pad chain |
+| `set_pad_device_parameter` | `track_index`, `device_index`, `note`, `chain_device_index`, `parameter_index`, `value` | Set a parameter inside a pad chain |
+| `load_browser_item_to_pad` | `track_index`, `device_index`, `note`, `item_uri` | Load a browser item at the end of a pad chain |
+
+### Other
+- Parameter reads (`get_device_parameters` and the new commands) include `display`: the value as Live
+  shows it ("-15.0 dB", "4:1", "On").
+- The Plug-Ins browser category is exposed for search and path browsing (branch `feat/browser-plugins`).
+
+---
+
 [![smithery badge](https://smithery.ai/badge/@ahujasid/ableton-mcp)](https://smithery.ai/server/@ahujasid/ableton-mcp)
 
 AbletonMCP connects Ableton Live to Claude AI through the Model Context Protocol (MCP), allowing Claude to directly interact with and control Ableton Live. This integration enables AI-assisted music production, track creation, and Live session manipulation.
