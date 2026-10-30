@@ -1111,6 +1111,76 @@ def move_device_right(ctx: Context, track_index: int, device_index: int) -> str:
         logger.error(f"Error moving device: {str(e)}")
         return f"Error moving device: {str(e)}"
 
+
+def _call(name, params, what):
+    try:
+        return json.dumps(get_ableton_connection().send_command(name, params), indent=2)
+    except Exception as e:
+        logger.error(f"Error {what}: {str(e)}")
+        return f"Error {what}: {str(e)}"
+
+@mcp.tool()
+def move_device_to_track(ctx: Context, track_index: int, device_index: int, target_track_index: int,
+                         position: int = -1) -> str:
+    """
+    Move a device to another track with its full state (VST/AU plug-ins included).
+
+    Parameters:
+    - track_index / device_index: the device to move
+    - target_track_index: the track to move it to
+    - position: index in the target chain; -1 = append at the end
+    """
+    return _call("move_device_to_track", {"track_index": track_index, "device_index": device_index,
+                                          "target_track_index": target_track_index, "position": position},
+                 "moving device to track")
+
+@mcp.tool()
+def get_arrangement_clips(ctx: Context, track_index: int) -> str:
+    """List the Arrangement View clips of a track (index, name, start/end in beats, MIDI or audio, muted)."""
+    return _call("get_arrangement_clips", {"track_index": track_index}, "getting arrangement clips")
+
+@mcp.tool()
+def get_arrangement_clip_notes(ctx: Context, track_index: int, clip_index: int) -> str:
+    """
+    Get all notes of an Arrangement MIDI clip, including probability, velocity deviation
+    and release velocity. clip_index is the index from get_arrangement_clips.
+    """
+    return _call("get_arrangement_clip_notes", {"track_index": track_index, "clip_index": clip_index},
+                 "getting arrangement clip notes")
+
+@mcp.tool()
+def set_arrangement_clip_notes(ctx: Context, track_index: int, clip_index: int, notes: List[Dict[str, Any]]) -> str:
+    """
+    Replace all notes of an Arrangement MIDI clip (Live 11 note API, one undo step).
+
+    Parameters:
+    - notes: list of {pitch, start_time, duration, velocity, mute?, probability?, velocity_deviation?,
+      release_velocity?}; times in beats from the clip start
+    """
+    return _call("set_arrangement_clip_notes", {"track_index": track_index, "clip_index": clip_index,
+                                                "notes": notes}, "setting arrangement clip notes")
+
+@mcp.tool()
+def remap_arrangement_notes(ctx: Context, track_index: int, from_pitch: int, to_pitch: int,
+                            clip_indices: Optional[List[int]] = None, include_session: bool = False) -> str:
+    """
+    Change the pitch of existing notes in place (from_pitch -> to_pitch) in a track's Arrangement clips,
+    keeping timing, velocity and other note properties.
+
+    Parameters:
+    - clip_indices: Arrangement clip indices to touch; omit for all
+    - include_session: also remap the track's Session View clips
+    """
+    return _call("remap_arrangement_notes", {"track_index": track_index, "from_pitch": from_pitch,
+                                             "to_pitch": to_pitch, "clip_indices": clip_indices,
+                                             "include_session": include_session}, "remapping arrangement notes")
+
+@mcp.tool()
+def transpose_arrangement_clip(ctx: Context, track_index: int, clip_index: int, semitones: int) -> str:
+    """Transpose every note of one Arrangement MIDI clip by semitones (clamped to 0-127)."""
+    return _call("transpose_arrangement_clip", {"track_index": track_index, "clip_index": clip_index,
+                                                "semitones": semitones}, "transposing arrangement clip")
+
 @mcp.tool()
 def set_track_color(ctx: Context, track_index: int, color: int) -> str:
     """
